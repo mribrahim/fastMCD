@@ -22,27 +22,65 @@
 #ifndef	_MCDWRAPPER_CPP_
 #define	_MCDWRAPPER_CPP_
 
+#include <time.h>
+#include <winsock.h>
+
 #include <ctime>
 #include <cstring>
 #include "MCDWrapper.hpp"
 #include "params.hpp"
 
+
+
 #if defined _WIN32 || defined _WIN64
-int gettimeofday(struct timeval *tp, int *tz)
+
+#if defined(_MSC_VER) || defined(_MSC_EXTENSIONS)
+#define DELTA_EPOCH_IN_MICROSECS  11644473600000000Ui64
+#else
+#define DELTA_EPOCH_IN_MICROSECS  11644473600000000ULL
+#endif
+
+struct timezone
 {
-	LARGE_INTEGER tickNow;
-	static LARGE_INTEGER tickFrequency;
-	static BOOL tickFrequencySet = FALSE;
-	if (tickFrequencySet == FALSE) {
-		QueryPerformanceFrequency(&tickFrequency);
-		tickFrequencySet = TRUE;
+	int  tz_minuteswest; /* minutes W of Greenwich */
+	int  tz_dsttime;     /* type of dst correction */
+};
+
+int gettimeofday(struct timeval* tv, struct timezone* tz)
+{
+	FILETIME ft;
+	unsigned __int64 tmpres = 0;
+	static int tzflag;
+
+	if (NULL != tv)
+	{
+		GetSystemTimeAsFileTime(&ft);
+
+		tmpres |= ft.dwHighDateTime;
+		tmpres <<= 32;
+		tmpres |= ft.dwLowDateTime;
+
+		/*converting file time to unix epoch*/
+		tmpres /= 10;  /*convert into microseconds*/
+		tmpres -= DELTA_EPOCH_IN_MICROSECS;
+		tv->tv_sec = (long)(tmpres / 1000000UL);
+		tv->tv_usec = (long)(tmpres % 1000000UL);
 	}
-	QueryPerformanceCounter(&tickNow);
-	tp->tv_sec = (long)(tickNow.QuadPart / tickFrequency.QuadPart);
-	tp->tv_usec = (long)(((tickNow.QuadPart % tickFrequency.QuadPart) * 1000000L) / tickFrequency.QuadPart);
+
+	if (NULL != tz)
+	{
+		if (!tzflag)
+		{
+			_tzset();
+			tzflag++;
+		}
+		tz->tz_minuteswest = _timezone / 60;
+		tz->tz_dsttime = _daylight;
+	}
 
 	return 0;
 }
+
 #else
 #include <sys/time.h>
 #endif
@@ -56,35 +94,33 @@ MCDWrapper::~MCDWrapper()
 }
 
 void
- MCDWrapper::Init(IplImage * in_imgIpl)
+ MCDWrapper::Init(Mat frame_gray)
 {
 
 	frm_cnt = 0;
-	imgIpl = in_imgIpl;
 
-	// Allocate
-	imgIplTemp = cvCreateImage(cvSize(in_imgIpl->width, in_imgIpl->height), IPL_DEPTH_8U, 1);
-	imgGray = cvCreateImage(cvSize(in_imgIpl->width, in_imgIpl->height), IPL_DEPTH_8U, 1);
-	imgGrayPrev = cvCreateImage(cvSize(in_imgIpl->width, in_imgIpl->height), IPL_DEPTH_8U, 1);
-	imgGaussLarge = cvCreateImage(cvSize(in_imgIpl->width, in_imgIpl->height), IPL_DEPTH_8U, 1);
-	imgGaussSmall = cvCreateImage(cvSize(in_imgIpl->width, in_imgIpl->height), IPL_DEPTH_8U, 1);
-	imgDOG = cvCreateImage(cvSize(in_imgIpl->width, in_imgIpl->height), IPL_DEPTH_8U, 1);
+	//// Allocate
+	imgGray = Mat(Size(frame_gray.cols, frame_gray.rows), CV_8U, 1);
+	imgGrayPrev = Mat(Size(frame_gray.cols, frame_gray.rows), CV_8U, 1);
+	//imgGaussLarge = new Mat(Size(in_imgIpl->cols, in_imgIpl->rows), CV_8U, 1);
+	//imgGaussSmall = new Mat(Size(in_imgIpl->cols, in_imgIpl->rows), CV_8U, 1);
+	//imgDOG = new Mat(Size(in_imgIpl->cols, in_imgIpl->rows), CV_8U, 1);
 
-	detect_img = cvCreateImage(cvSize(in_imgIpl->width, in_imgIpl->height), IPL_DEPTH_8U, 1);
+	//detect_img = new Mat(Size(in_imgIpl->cols, in_imgIpl->rows), CV_8U, 1);
+	fgMask = Mat(Size(frame_gray.cols, frame_gray.rows), CV_8UC1, Scalar(0));
 
 	//TODO directly retrieve imgIpl (change to Mat later)
 
 	// Smoothing using median filter
-	cvCvtColor(imgIpl, imgIplTemp, CV_RGB2GRAY);
-	cvSmooth(imgIplTemp, imgGray, CV_MEDIAN, 5);
+	medianBlur(frame_gray, imgGray, 5);
 
 	m_LucasKanade.Init(imgGray);
-	BGModel.init(imgGray);
+	BGModel.init(&imgGray);
 
-	cvCopy(imgGray, imgGrayPrev);
+	imgGray.copyTo(imgGrayPrev);
 }
 
-void MCDWrapper::Run()
+Mat MCDWrapper::Run(Mat frame_gray)
 {
 
 	frm_cnt++;
@@ -96,10 +132,9 @@ void MCDWrapper::Run()
 	float rt_total;		// Background Subtraction time
 
 	//--TIME START
-	cvCvtColor(imgIpl, imgIplTemp, CV_RGB2GRAY);
 	gettimeofday(&tic, NULL);
 	// Smmothign using median filter
-	cvSmooth(imgIplTemp, imgGray, CV_MEDIAN, 5);
+	medianBlur(frame_gray, imgGray, 5);
 
 	//--TIME END
 	gettimeofday(&toc, NULL);
@@ -109,9 +144,22 @@ void MCDWrapper::Run()
 	gettimeofday(&tic, NULL);
 	// Calculate Backward homography
 	// Get H
+	Mat homoMat;
+	m_LucasKanade.RunTrack(imgGray, imgGrayPrev);
+	m_LucasKanade.GetHomography(homoMat);
+
+
 	double h[9];
-	m_LucasKanade.RunTrack(imgGray, 0);
-	m_LucasKanade.GetHomography(h);
+	h[0] = homoMat.at<double>(0, 0);
+	h[1] = homoMat.at<double>(0, 1);
+	h[2] = homoMat.at<double>(0, 2);
+	h[3] = homoMat.at<double>(1, 0);
+	h[4] = homoMat.at<double>(1, 1);
+	h[5] = homoMat.at<double>(1, 2);
+	h[6] = homoMat.at<double>(2, 0);
+	h[7] = homoMat.at<double>(2, 1);
+	h[8] = homoMat.at<double>(2, 2);
+
 	BGModel.motionCompensate(h);
 
 	//--TIME END
@@ -121,7 +169,12 @@ void MCDWrapper::Run()
 	//--TIME START
 	gettimeofday(&tic, NULL);
 	// Update BG Model and Detect
-	BGModel.update(detect_img);
+	//BGModel.update(detect_img);
+	fgMask.setTo(Scalar(0));
+	BGModel.update(imgGray.data, imgGray.step, fgMask.data, fgMask.step);
+
+	//imshow("mask", fgMask);
+
 	//--TIME END
 	gettimeofday(&toc, NULL);
 	rt_modelUpdate = (float)(toc.tv_usec - tic.tv_usec) / 1000.0;
@@ -138,10 +191,10 @@ void MCDWrapper::Run()
 
 	//////////////////////////////////////////////////////////////////////////
 	// Debug Output
-	for (int i = 0; i < 100; ++i) {
-		printf("\b");
-	}
-	printf("PP: %.2f(ms)\tOF: %.2f(ms)\tBGM: %.2f(ms)\tTotal time: \t%.2f(ms)", MAX(0.0, rt_preProc), MAX(0.0, rt_motionComp), MAX(0.0, rt_modelUpdate), MAX(0.0, rt_total));
+	//for (int i = 0; i < 100; ++i) {
+	//	printf("\b");
+	//}
+	//printf("PP: %.2f(ms)\tOF: %.2f(ms)\tBGM: %.2f(ms)\tTotal time: \t%.2f(ms)", MAX(0.0, rt_preProc), MAX(0.0, rt_motionComp), MAX(0.0, rt_modelUpdate), MAX(0.0, rt_total));
 
 	// Uncomment this block if you want to save runtime to txt
 	// if(rt_preProc >= 0 && rt_motionComp >= 0 && rt_modelUpdate >= 0 && rt_total >= 0){
@@ -150,9 +203,12 @@ void MCDWrapper::Run()
 	//      fclose(fileRunTime);
 	// }
 
-	cvCopy(imgGray, imgGrayPrev);
-	cvWaitKey(10);
+	imgGray.copyTo(imgGrayPrev);
+	waitKey(10);
 
+	//imshow("imgGray", *imgGray);
+	//imshow("imgGrayPrev", *imgGrayPrev);
+	return fgMask;
 }
 
 #endif				// _MCDWRAPPER_CPP_

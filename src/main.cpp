@@ -19,36 +19,27 @@
 // SOFTWARE IS PROVIDED ``AS IS''  AND WITHOUT ANY WARRANTIES.  USE AT
 // YOUR OWN RISK!
 
+#include <string>
+#include <iostream>
+#include <fstream>
+#include <cstdlib>
+
 #include "main.hpp"
 
-using namespace std;
 
 int main(int argc, char *argv[])
 {
 
-	char test_file[100];
-	char abs_file[1000];
+	string infile_name;
 
-	if (argc != 3) {
-		printf("Usage: Binary [VideoFileFullPathWithExt] [bool DumpOutputImgs (1/0)]\n");
-		return -1;
+	for (size_t index = 0; index < argc; index++)
+	{
+		if (0 == strcmp("-v", argv[index])) {
+			if ((++index) < argc)
+				infile_name = argv[index];
+		}
 	}
 
-	/************************************************************************/
-	/*  Get MP4 Name exluding all paths                                     */
-	/************************************************************************/
-	strncpy(abs_file, (char *)(argv[1]), 1000);
-	//first run to find '/' token
-	int last_token_pos = 0;
-	for (int i = 0; abs_file[i] != '\0'; ++i) {
-		if (abs_file[i] == '/' || abs_file[i] == '\\')
-			last_token_pos = i;
-	}
-	int tmpidx = 0;
-	for (int i = last_token_pos; abs_file[i] != '.'; ++i) {
-		test_file[tmpidx++] = abs_file[i];
-	}
-	test_file[tmpidx] = '\0';
 
 	/************************************************************************/
 	/*  Initialize Variables                                                */
@@ -58,42 +49,20 @@ int main(int argc, char *argv[])
 	MCDWrapper *mcdwrapper = new MCDWrapper();
 
 	// OPEN CV VARIABLES
-	const char window_name[] = "OUTPUT";
-	IplImage *frame = 0, *frame_copy = 0, *vil_conv = 0, *raw_img = 0, *model_copy = 0, *model_img = 0;
-	IplImage *edge = 0;
+	std::string window_name = "OUTPUT";
+	Mat frame, frame_gray, fg, frame_copy;
+	Mat* edge;
+	Mat hsv, hsv_mask;
 
-	// File name strings
-	string infile_name;
-	infile_name.append(abs_file);
-	// Create output dir
-	system("mkdir ./results");
-	string mp4file_name("./results/");
-	mp4file_name.append(test_file);
-	mp4file_name.append("_result");
-	mp4file_name.append(".mp4");
-
+	std::cout << "opening file: " << infile_name << std::endl;
 	// Initialize capture
-	CvCapture *pInVideo = cvCaptureFromAVI(infile_name.data());
-
-	// // Create video writer with input video properties (this no longer works for some reason)
-	// // Initialize video writer
-	// CvVideoWriter *pVideoOut = NULL;
-
-	// // Read input video settings
-	// CvSize inVideoSize;
-	// inVideoSize.height = (int)cvGetCaptureProperty(pInVideo, CV_CAP_PROP_FRAME_HEIGHT);
-	// inVideoSize.width = (int)cvGetCaptureProperty(pInVideo, CV_CAP_PROP_FRAME_WIDTH);
-	// int inVideoFourCC = (int)cvGetCaptureProperty(pInVideo, CV_CAP_PROP_FOURCC);
-	// double inVideoFPS = cvGetCaptureProperty(pInVideo, CV_CAP_PROP_FPS);
-	int dTotalFrameNum = (int)cvGetCaptureProperty(pInVideo, CV_CAP_PROP_FRAME_COUNT);
-
-	// pVideoOut = cvCreateVideoWriter(mp4file_name.data(), CV_FOURCC('F', 'M', 'P', '4'), inVideoFPS, inVideoSize, 1);
+	VideoCapture *pInVideo = new VideoCapture(infile_name);
 
 	// Output window to be displayed
-	cvNamedWindow(window_name, CV_WINDOW_AUTOSIZE);
+	namedWindow(window_name, WINDOW_AUTOSIZE);
 
 	// Reset capture position
-	cvSetCaptureProperty(pInVideo, CV_CAP_PROP_POS_FRAMES, 0);
+	pInVideo->set(CAP_PROP_POS_FRAMES, 0);
 
 	// Init frame number and exit condition
 	int frame_num = 1;
@@ -102,112 +71,57 @@ int main(int argc, char *argv[])
 	/************************************************************************/
 	/*  The main process loop                                               */
 	/************************************************************************/
-	while (bRun == true && frame_num <= dTotalFrameNum) {	// the main loop
+	while (bRun == true && pInVideo->isOpened()) {	// the main loop
 
-		// Grab Frame
-		cvGrabFrame(pInVideo);
+		double start = getTickCount();
+
 		// Extract Frame (do decoding or other work)
-		IplImage *IplBuffer = cvRetrieveFrame(pInVideo);
+		if (!pInVideo->read(frame))
+			break;
 
-		// Copy to buffers
-		if (!frame_copy) {
-			frame_copy = cvCreateImage(cvSize(IplBuffer->width, IplBuffer->height), IPL_DEPTH_8U, IplBuffer->nChannels);
-			raw_img = cvCreateImage(cvSize(IplBuffer->width, IplBuffer->height), IPL_DEPTH_8U, IplBuffer->nChannels);
-		}
-		if (IplBuffer->origin == IPL_ORIGIN_TL) {
-			cvCopy(IplBuffer, frame_copy, 0);
-			cvCopy(IplBuffer, raw_img, 0);
-		} else {
-			cvFlip(IplBuffer, frame_copy, 0);
-			cvFlip(IplBuffer, raw_img, 0);
-		}
+		//resize(frame, frame, Size(960, 540));
+		cvtColor(frame, frame_gray, COLOR_RGB2GRAY);
 
 		if (frame_num == 1) {
 
 			// Init the wrapper for first frame
-			mcdwrapper->Init(raw_img);
+			mcdwrapper->Init(frame_gray);
 
-		} else {
+		} 
+		else {
 
 			// Run detection
-			mcdwrapper->Run();
+			fg = mcdwrapper->Run(frame_gray);
 
 		}
+		
+		double elapsed_time = ((double)getTickCount() - start) / getTickFrequency();
+		//float fps = cv::getTickFrequency() / (cv::getTickCount() - start);
+		//float fps = 100.0 / elapsed_time;
 
-		// Display detection results as overlay
-		for (int j = 0; j < frame_copy->height; ++j) {
-			for (int i = 0; i < frame_copy->width; ++i) {
+		putText(frame, std::to_string(frame_num), Point2d(10, 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 255), 2);
+		putText(frame, std::to_string(elapsed_time), Point2d(100, 20), FONT_HERSHEY_SIMPLEX, 1, Scalar(0, 0, 255), 2);
+		
+		if (fg.data)
+		{
+			cvtColor(fg, fg, COLOR_GRAY2RGB);
+			bitwise_or(frame, fg, frame);
+		}	
 
-				float draw_orig = 0.5;
-
-				BYTE *pMaskImg = (BYTE *) (mcdwrapper->detect_img->imageData);
-				int widthstepMsk = mcdwrapper->detect_img->widthStep;
-
-				int mask_data = pMaskImg[i + j * widthstepMsk];
-
-				((BYTE *) (frame_copy->imageData))[i * 3 + j * frame_copy->widthStep + 2] = draw_orig * ((BYTE *) (frame_copy->imageData))[i * 3 + j * frame_copy->widthStep + 2];
-				((BYTE *) (frame_copy->imageData))[i * 3 + j * frame_copy->widthStep + 1] = draw_orig * ((BYTE *) (frame_copy->imageData))[i * 3 + j * frame_copy->widthStep + 1];
-				((BYTE *) (frame_copy->imageData))[i * 3 + j * frame_copy->widthStep + 0] = draw_orig * ((BYTE *) (frame_copy->imageData))[i * 3 + j * frame_copy->widthStep + 0];
-
-				if (frame_num > 1) {
-					((BYTE *) (frame_copy->imageData))[i * 3 + j * frame_copy->widthStep + 2] += mask_data > 0 ? 255 * (1.0 - draw_orig) : 0;
-				}
-
-			}
-		}
-
-		// Print some frame numbers as well
-		char buf[100];
-		sprintf(buf, "%d", frame_num);
-		CvFont font;
-		double hScale = 0.5;
-		double vScale = 0.5;
-		int lineWidth = 2;
-		cvInitFont(&font, CV_FONT_HERSHEY_SIMPLEX, hScale, vScale, 0, lineWidth);
-		cvPutText(frame_copy, buf, cvPoint(10, 20), &font, cvScalar(255, 255, 0));
-
-		// Show image
-		cvShowImage(window_name, frame_copy);
-
-		// // DISPLAY---- and write to png
-		// cvWriteFrame(pVideoOut, frame_copy);
-
-		if (atoi((char *)(argv[2])) > 0 && frame_num >= 1) {
-
-			for (int j = 0; j < frame_copy->height; ++j) {
-				for (int i = 0; i < frame_copy->width; ++i) {
-
-					float draw_orig = 0.5;
-
-					BYTE *pMaskImg = (BYTE *) (mcdwrapper->detect_img->imageData);
-					int widthstepMsk = mcdwrapper->detect_img->widthStep;
-
-					int mask_data = pMaskImg[i + j * widthstepMsk];
-
-					((BYTE *) (frame_copy->imageData))[i * 3 + j * frame_copy->widthStep + 2] = mask_data > 0 ? 255 : 0;
-					((BYTE *) (frame_copy->imageData))[i * 3 + j * frame_copy->widthStep + 1] = mask_data > 0 ? 255 : 0;
-					((BYTE *) (frame_copy->imageData))[i * 3 + j * frame_copy->widthStep + 0] = mask_data > 0 ? 255 : 0;
-				}
-			}
-
-			char bufbuf[1000];
-			sprintf(bufbuf, "./results/%s_frm%05d.png", test_file, frame_num);
-			cvSaveImage(bufbuf, frame_copy);
-		}
+		imshow(window_name, frame);
+		waitKey(10);
+		
 		//KeyBoard Process
-		switch (cvWaitKey(1)) {
-		case 'q':	// press q to quit
-			bRun = false;
-			break;
-		default:
+		int k = waitKey(1);
+		if ('q' == k)
+		{
 			break;
 		}
 		++frame_num;
 
 	}
-	cvReleaseImage(&raw_img);
-	cvReleaseImage(&frame_copy);
-	// cvReleaseVideoWriter(&pVideoOut);
+
+	pInVideo->release();
 
 	return 0;
 }

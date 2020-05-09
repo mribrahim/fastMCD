@@ -21,15 +21,12 @@
 
 #include "KLTWrapper.hpp"
 
-#include <vector>
-#include <highgui.h>
 
 KLTWrapper::KLTWrapper(void)
 {
 	// For LK funciton in opencv
 	win_size = 10;
-	points[0] = points[1] = 0;
-	status = 0;
+	//status = 0;
 	count = 0;
 	flags = 0;
 
@@ -40,42 +37,39 @@ KLTWrapper::KLTWrapper(void)
 
 KLTWrapper::~KLTWrapper(void)
 {
-	cvReleaseImage(&eig);
-	cvReleaseImage(&temp);
-	cvReleaseImage(&maskimg);
+	eig->release();
+	temp->release();
+	maskimg->release();
 }
 
-void KLTWrapper::Init(IplImage * imgGray)
+void KLTWrapper::Init(Mat imgGray)
 {
-	int ni = imgGray->width;
-	int nj = imgGray->height;
+	int ni = imgGray.cols;
+	int nj = imgGray.rows;
 
 	// Allocate Maximum possible + some more for safety
 	MAX_COUNT = (float (ni) / float (GRID_SIZE_W) + 1.0)*(float (nj) / float (GRID_SIZE_H) + 1.0);
 
 	// Pre-allocate
-	image = cvCreateImage(cvGetSize(imgGray), 8, 3);
-	imgPrevGray = cvCreateImage(cvGetSize(imgGray), 8, 1);
-	pyramid = cvCreateImage(cvGetSize(imgGray), 8, 1);
-	prev_pyramid = cvCreateImage(cvGetSize(imgGray), 8, 1);
-	points[0] = (CvPoint2D32f *) cvAlloc(MAX_COUNT * sizeof(points[0][0]));
-	points[1] = (CvPoint2D32f *) cvAlloc(MAX_COUNT * sizeof(points[0][0]));
-	status = (char *)cvAlloc(MAX_COUNT);
+	image = Mat(Size(imgGray.cols, imgGray.rows), CV_8U, 3); 
+	imgPrevGray = Mat(Size(imgGray.cols, imgGray.rows), CV_8U, 1);
+
+
 	flags = 0;
 
 	if (eig != NULL) {
-		cvReleaseImage(&eig);
-		cvReleaseImage(&temp);
-		cvReleaseImage(&maskimg);
+		eig->release();
+		temp->release();
+		maskimg->release();
 	}
 
-	eig = cvCreateImage(cvGetSize(imgGray), 32, 1);
-	temp = cvCreateImage(cvGetSize(imgGray), 32, 1);
-	maskimg = cvCreateImage(cvGetSize(imgGray), IPL_DEPTH_8U, 1);
+	eig = new Mat(Size(imgGray.cols, imgGray.rows), CV_8U, 1);
+	temp = new Mat(Size(imgGray.cols, imgGray.rows), CV_8U, 1);
+	maskimg = new Mat(Size(imgGray.cols, imgGray.rows), CV_8U, 1);
 
 	// Gen mask
-	BYTE *pMask = (BYTE *) maskimg->imageData;
-	int widthStep = maskimg->widthStep;
+	BYTE *pMask = (BYTE *) maskimg->data;
+	int widthStep = maskimg->step;
 	for (int j = 0; j < nj; ++j) {
 		for (int i = 0; i < ni; ++i) {
 			pMask[i + j * widthStep] = (i >= ni / 5) && (i <= ni * 4 / 5) && (j >= nj / 5) && (j <= nj * 4 / 5) ? (BYTE) 255 : (BYTE) 255;
@@ -83,49 +77,57 @@ void KLTWrapper::Init(IplImage * imgGray)
 	}
 
 	// Init homography
-	for (int i = 0; i < 9; i++)
-		matH[i] = i / 3 == i % 3 ? 1 : 0;
+	homoMat = (Mat_<double>(3, 3) << 1, 0, 0, 0, 1, 0, 0, 0, 1);
 }
 
-void KLTWrapper::InitFeatures(IplImage * imgGray)
+void KLTWrapper::InitFeatures(Mat imgGray)
 {
 	/* automatic initialization */
 	double quality = 0.01;
 	double min_distance = 10;
 
-	int ni = imgGray->width;
-	int nj = imgGray->height;
+	int ni = imgGray.cols;
+	int nj = imgGray.rows;
 
-	count = ni / GRID_SIZE_W * nj / GRID_SIZE_H;
 
-	int cnt = 0;
-	for (int i = 0; i < ni / GRID_SIZE_W - 1; ++i) {
-		for (int j = 0; j < nj / GRID_SIZE_H - 1; ++j) {
-			points[1][cnt].x = i * GRID_SIZE_W + GRID_SIZE_W / 2;
-			points[1][cnt++].y = j * GRID_SIZE_H + GRID_SIZE_H / 2;
+	if (pointsPrev.empty())
+	{
+	//pointsPrev.clear();
+		for (int i = 0; i < ni / GRID_SIZE_W - 1; ++i) {
+			for (int j = 0; j < nj / GRID_SIZE_H - 1; ++j) {
+				pointsPrev.push_back(Vec2f(i * GRID_SIZE_W + GRID_SIZE_W / 2, j * GRID_SIZE_H + GRID_SIZE_H / 2));
+				//pointsCurrent.push_back(Vec2f(i * GRID_SIZE_W + GRID_SIZE_W / 2, j * GRID_SIZE_H + GRID_SIZE_H / 2));
+			}
 		}
 	}
 
 	SwapData(imgGray);
 }
 
-void KLTWrapper::RunTrack(IplImage * imgGray, IplImage * prevGray)
+void KLTWrapper::RunTrack(Mat imgGray, Mat prevGray)
 {
-	int i, k;
-	int nMatch[MAX_COUNT];
+	int i, k = 0;
+	int* nMatch = (int*)alloca(sizeof(int) * MAX_COUNT);
 
-	if (prevGray == 0) {
+	if (!prevGray.empty()) {
+		//imgPrevGray->copyTo(*prevGray);
 		prevGray = imgPrevGray;
 	} else {
 		flags = 0;
 	}
 
-	memset(image->imageData, 0, image->imageSize);
-	if (count > 0) {
-		cvCalcOpticalFlowPyrLK(prevGray, imgGray, prev_pyramid, pyramid,
-				       points[0], points[1], count, cvSize(win_size, win_size), 3, status, 0, cvTermCriteria(CV_TERMCRIT_ITER | CV_TERMCRIT_EPS, 20, 0.03), flags);
-		flags |= CV_LKFLOW_PYR_A_READY;
-		for (i = k = 0; i < count; i++) {
+	//memset(image->data, 0, image->rows * image->cols);
+	if (pointsPrev.size()) {
+
+		//goodFeaturesToTrack(*prevGray, points0, 100, 0.3, 7, Mat(), 7, false, 0.04);
+
+		//std::vector<float> err;
+		TermCriteria criteria = TermCriteria((TermCriteria::COUNT) + (TermCriteria::EPS), 20, 0.03);
+		calcOpticalFlowPyrLK(prevGray, imgGray, pointsPrev, pointsCurrent, status, noArray(), Size(15, 15), 2, criteria, flags);
+		//calcOpticalFlowPyrLK(*prevGray, *imgGray, points[0], points[1], status, noArray(), Size(15, 15), 2, criteria, flags);
+
+		//flags |= 1;
+		for (i = k = 0; i < status.size(); i++) {
 			if (!status[i]) {
 				continue;
 			}
@@ -135,55 +137,42 @@ void KLTWrapper::RunTrack(IplImage * imgGray, IplImage * prevGray)
 		count = k;
 	}
 
-	if (count >= 10) {
+	if (k >= 10) {
 		// Make homography matrix with correspondences
 		MakeHomoGraphy(nMatch, count);
+		//homoMat = findHomography(points0, points1, RANSAC, 1);
 	} else {
-		for (int ii = 0; ii < 9; ++ii) {
-			matH[ii] = ii % 3 == ii / 3 ? 1.0f : 0.0f;
-		}
+		homoMat = (Mat_<double>(3, 3) << 1, 0, 0, 0, 1, 0, 0, 0, 1);
 	}
 
+	//Mat result;
+	//warpPerspective(*imgGray, result, homoMat, Size(imgGray->cols, imgGray->rows));
+	//imshow("warped", result);
+	
 	InitFeatures(imgGray);
 }
 
-void KLTWrapper::SwapData(IplImage * imgGray)
+void KLTWrapper::SwapData(Mat imgGray)
 {
-	cvCopyImage(imgGray, imgPrevGray);
-	CV_SWAP(prev_pyramid, pyramid, swap_temp);
-	CV_SWAP(points[0], points[1], swap_points);
+	imgGray.copyTo(imgPrevGray);
+	//cv::swap(*prev_pyramid, *pyramid);
+	//std::swap(pointsCurrent, pointsPrev);
 }
 
-void KLTWrapper::GetHomography(double *pmatH)
+void KLTWrapper::GetHomography(Mat& pmatH)
 {
-	memcpy(pmatH, matH, sizeof(matH));
+	pmatH = homoMat;
 }
 
 void KLTWrapper::MakeHomoGraphy(int *pnMatch, int nCnt)
 {
-	double h[9];
-	CvMat _h = cvMat(3, 3, CV_64F, h);
-	std::vector < CvPoint2D32f > pt1, pt2;
-	CvMat _pt1, _pt2;
-	int i;
-
-	pt1.resize(nCnt);
-	pt2.resize(nCnt);
-	for (i = 0; i < nCnt; i++) {
-		//REVERSE HOMOGRAPHY
-		pt1[i] = points[1][pnMatch[i]];
-		pt2[i] = points[0][pnMatch[i]];
-	}
-
-	_pt1 = cvMat(1, nCnt, CV_32FC2, &pt1[0]);
-	_pt2 = cvMat(1, nCnt, CV_32FC2, &pt2[0]);
-	if (!cvFindHomography(&_pt1, &_pt2, &_h, CV_RANSAC, 1))
-//      if(!cvFindHomography( &_pt1, &_pt2, &_h, CV_LMEDS, 1))
+	vector<Point2f> pt1;
+	vector<Point2f> pt2;
+	for (int i = 0; i < nCnt; ++i)
 	{
-		return;
-	}
+		pt1.push_back(pointsCurrent[pnMatch[i]]);
+		pt2.push_back(pointsPrev[pnMatch[i]]);
 
-	for (i = 0; i < 9; i++) {
-		matH[i] = h[i];
 	}
+	homoMat = findHomography(pt1, pt2, RANSAC, 1);
 }
