@@ -104,8 +104,16 @@ int main(int argc, char *argv[])
 		
 		if (fg.data)
 		{
-			cvtColor(fg, fg, COLOR_GRAY2RGB);
-			bitwise_or(frame, fg, frame);
+			//cvtColor(fg, fg, COLOR_GRAY2RGB);
+			Mat zeros = Mat(fg.rows, fg.cols, CV_8UC1, Scalar(0));
+			vector<Mat> channels;
+			channels.push_back(fg);
+			channels.push_back(zeros);
+			channels.push_back(zeros);
+
+			Mat mask;
+			merge(channels, mask);
+			bitwise_or(frame, mask, frame);
 		}	
 
 		imshow(window_name, frame);
